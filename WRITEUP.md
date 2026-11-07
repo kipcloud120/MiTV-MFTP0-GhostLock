@@ -532,8 +532,9 @@ agent up pid=6369 uid=0 Sat Nov  7 16:19:39 CST 2026
 ```
 
 `enforce` was 1 before and after; the shell process has `CapEff=0`. So on this build a
-console with adb reaches root without the exploit at all. The two are **independent
-paths**, not a chain.
+console with adb reaches a root context without the exploit at all. The two are
+**independent paths**, not a chain — but "root context" is not the same as "unrestricted
+root", and section 11.2 quantifies how far that context actually reaches.
 
 Note what is ours and what is the vendor's: the primitive is only "execute this script
 as root". `agent.sh` (ghost/agent.sh) is this project's own polling loop over
@@ -586,6 +587,72 @@ Two consequences worth stating plainly:
 One constraint still holds: `mediaserver` cannot `exec` a shell (no `shell_exec`
 allowance), which is why the persistence payload execs a *copy* of `/system/bin/service`
 placed in a `system_data_file` directory rather than `/system/bin/sh`.
+
+### 11.2 How far that root actually reaches
+
+"Root" here is uid 0 inside `u:r:misysdiagnose:s0`, not an unrestricted root. The domain
+does hold every capability this kernel defines — `CapEff = 0x3fffffffff`, `cap_last_cap = 37`,
+so all 38 bits are set — but capabilities are only one of the gates, and under enforcing
+the policy still bounds what the domain can touch.
+
+The numbers below come from the audit log collected on 2026-11-07 while the policy was
+permissive. A denial is audited in permissive mode too, and this device does log them
+(`permissive=1` on every entry), so an absent entry is evidence of an allow. Counts are
+audit *lines*; one denied access can emit two or three lines, one per permission checked,
+so read them as relative weight rather than as distinct denial counts.
+
+| Operation | Under enforcing | Audit lines |
+|---|---|---|
+| write files under `/data` | allowed | none — all 18 `write` denials target `/dev/kmsg`, netlink sockets, or two directory nodes |
+| `CAP_DAC_OVERRIDE` on a `system:system 0600` file | allowed | none — the only capability-class denials are `net_admin` |
+| read `/proc/uptime` | denied | 154 |
+| read `/proc/net/tcp` and `/proc/net/udp` | denied | 116 |
+| `AF_PACKET` sockets | denied | 66 |
+| binder `transfer` and `call` to `system_server` | denied | 43 + 14 |
+| exec `/system/bin/app_process32` | denied | 16 |
+| write `/dev/kmsg` | denied | 12 |
+| exec this project's own `/data/anr/sniff` | denied | 4 |
+| `iptables` (`CAP_NET_ADMIN`) | denied | 4 |
+
+Reading another domain's `/proc/<pid>/stat` is denied as well; those entries are mixed in
+with the totals above rather than separable by a single pattern.
+
+Three things follow.
+
+First, the practical statement is: **with adb alone on an enforcing unit you get a uid-0
+script runner that can read and write `/data` and very little else.** Packet capture, the
+`settings` and `cmd` calls this project makes, walking other processes, and running its own
+tools out of `/data/anr` all require permissive first. That is what the exploit buys on this
+build — not access, but reach.
+
+Second, capability checks are themselves SELinux-hooked. `CapEff` having a bit set is not
+sufficient under enforcing; the domain also needs `allow <domain> self:capability <perm>`.
+The four `capability=12` denials are exactly that: `CAP_NET_ADMIN` is present in `CapEff`,
+and the policy refuses it anyway. "38 capabilities" describes the mask, not the grant.
+
+Third, writability of the system partitions is a separate axis that none of the above
+decides:
+
+| Target | Result |
+|---|---|
+| `/` (= `system`, `dm-0`) | `mount -o remount,rw /` refused: `'/dev/root' is read-only` |
+| `/vendor` (`dm-1`) | remount rw is *accepted* at the VFS layer, then every write fails in the block layer with `Buffer I/O error on dev dm-1 … lost async page write`; a later `remount,ro` also fails with `EIO` until reboot |
+| `mmcblk0p30` (`system`, raw) | `ro=0`, writable with `dd` — which destroys the verity hash tree and fails verification on the next boot |
+| `mmcblk0p32` (`vendor`, raw) | `ro=1` |
+| `/vendor/tvconfig`, `/vendor/tvcertificate` | separate rw partitions nested inside the ro `/vendor`; writable |
+
+So the channel cannot modify `system` or `vendor` in place. That is consistent with section
+12: persistence needs a Recovery detour, not a clever command.
+
+An independent writeup reaches the same conclusion on a sibling model — `MiTV-ASTP0` /
+`mulan` / L75MA-AC, Android 9, build 2.10.3982 —
+<https://i95.me/mitv-magisk-root-tutorial> (2026-07-21, mirrored at ZNDS `tv-1272142`).
+It documents the same `service call TvService 4400 s16 s s16 <script>` entry, states that
+the elevation happens in the binder server rather than in the adb shell process, and warns
+that uid 0 there does not imply the ability to remount partitions or write `/vendor`,
+`/odm`, `boot` or `vbmeta`. It also notes that the domain was never shown to hold the mount
+and boot-chain permissions persistence would need, and installs Magisk through
+UART/Recovery instead.
 
 ---
 
