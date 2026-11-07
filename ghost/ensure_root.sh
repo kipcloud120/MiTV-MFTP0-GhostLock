@@ -40,8 +40,22 @@ if SH 'ps -A -o ARGS | grep -q "[p]fnd2.sh" && echo yes' | grep -q yes; then
 else
   echo "[ensure] pfnd2 missing, starting one"
   MSYS2_ARG_CONV_EXCL='*' "$ADB" -s "$DEV" push "$HERE/pfnd2.sh" //sdcard/Download/pfnd2.sh >/dev/null 2>&1
-  printf 'pkill -f pfnd.sh 2>/dev/null\n( /system/bin/sh /sdcard/Download/pfnd2.sh </dev/null >/dev/null 2>&1 & )\n' > "$HERE/cmd_boot_pfnd2.sh"
+  # No "pkill -f pfnd.sh" here on purpose: measured, that pkill took the freshly
+  # started agent down with it (the agent runs this very script through cmd.sh,
+  # so killing by process-name pattern is a foot-gun). The single-shot pfnd.sh it
+  # used to clean up no longer exists; duplicate pfnd2 instances are harmless.
+  printf '( /system/bin/sh /sdcard/Download/pfnd2.sh </dev/null >/dev/null 2>&1 & )\n' > "$HERE/cmd_boot_pfnd2.sh"
   MSYS2_ARG_CONV_EXCL='*' "$ADB" -s "$DEV" push "$HERE/cmd_boot_pfnd2.sh" //sdcard/Download/cmd.sh >/dev/null 2>&1
+  sleep 3
+fi
+
+# 3) verify; if the agent vanished (e.g. it was killed while running cmd.sh),
+#    bring it up once more. Cold-boot property is empty, so a plain "s" triggers.
+if ! SH 'ps -A -o ARGS | grep -q "[a]gent.sh" && echo yes' | grep -q yes; then
+  echo "[ensure] agent gone after start, retrying once"
+  SH 'service call TvService 4400 s16 x s16 sh,/sdcard/Download/agent.sh' >/dev/null
+  sleep 1
+  SH 'service call TvService 4400 s16 s s16 sh,/sdcard/Download/agent.sh' >/dev/null
   sleep 3
 fi
 
