@@ -595,42 +595,83 @@ does hold every capability this kernel defines — `CapEff = 0x3fffffffff`, `cap
 so all 38 bits are set — but capabilities are only one of the gates, and under enforcing
 the policy still bounds what the domain can touch.
 
-The numbers below come from the audit log collected on 2026-11-07 while the policy was
-permissive. A denial is audited in permissive mode too, and this device does log them
-(`permissive=1` on every entry), so an absent entry is evidence of an allow. Counts are
-audit *lines*; one denied access can emit two or three lines, one per permission checked,
-so read them as relative weight rather than as distinct denial counts.
+The table below has two columns of evidence. The right one is the audit traffic collected
+on 2026-11-07 while the policy was permissive: a denial is audited in permissive mode too,
+and this device logs them, so an absent entry is evidence of an allow there. Counts are audit
+*lines*; one denied access can emit two or three lines, one per permission checked, so read
+them as relative weight rather than as distinct denial counts.
 
-| Operation | Under enforcing | Audit lines |
+The middle column was originally *inferred* from those counts. That inference was wrong in
+two places, so every operation was re-run with the policy enforcing, and the column now
+records what the operation actually did. Where the two disagree, the measurement wins.
+
+| Operation | Under enforcing (measured) | Permissive audit lines |
 |---|---|---|
-| write files under `/data` | allowed | none — all 18 `write` denials target `/dev/kmsg`, netlink sockets, or two directory nodes |
-| `CAP_DAC_OVERRIDE` on a `system:system 0600` file | allowed | none — the only capability-class denials are `net_admin` |
-| read `/proc/uptime` | denied | 154 |
-| read `/proc/net/tcp` and `/proc/net/udp` | denied | 116 |
-| `AF_PACKET` sockets | denied | 66 |
-| binder `transfer` and `call` to `system_server` | denied | 43 + 14 |
-| exec `/system/bin/app_process32` | denied | 16 |
-| write `/dev/kmsg` | denied | 12 |
-| exec this project's own `/data/anr/sniff` | denied | 4 |
-| `iptables` (`CAP_NET_ADMIN`) | denied | 4 |
+| write files under `/data` | allowed | 0 — all 18 `write` denials target `/dev/kmsg`, netlink sockets, or two directory nodes |
+| `CAP_DAC_OVERRIDE` on a `system:system 0600` file | allowed — the XML header came out of `settings_system.xml` | 0 — the only capability-class denials are `net_admin` |
+| read `/proc/uptime` | denied, `EACCES` | 154 |
+| read `/proc/net/tcp` and `/proc/net/udp` | denied, `EACCES` | 116 |
+| `AF_PACKET` sockets | not testable from this domain — see below | 66 |
+| binder `call` to `system_server` | **allowed** — `service call activity 1` returns a parcel carrying `system_server`'s own `IllegalArgumentException` | 57 (`transfer` 43 + `call` 14) |
+| exec `/system/bin/app_process32` | denied at `getattr`, before `execve` runs | 16 |
+| write `/dev/kmsg` | denied, `EACCES` | 12 |
+| exec this project's own `/data/anr/sniff` | denied, `EACCES` | 4 |
+| `iptables` | denied — at the raw socket, well before the capability check | 4 (`capability=12`) |
+| `getenforce` | denied — `/sys/fs/selinux/enforce` is a policy object too | — |
+| read another domain's `/proc/<pid>/stat` | **mixed**: `init` and `system_server` readable, HAL domains not | mixed in with the totals above |
 
-Reading another domain's `/proc/<pid>/stat` is denied as well; those entries are mixed in
-with the totals above rather than separable by a single pattern.
+A note on method: this kernel runs `audit_rate_limit=5` and logged `audit_lost=1006` during
+the re-run, so bursts of denials get dropped. "No audit line" is therefore evidence of an
+allow only in the original permissive, low-rate collection; under enforcing the classification
+rests on the result of the operation, with the audit lines as corroboration.
 
-Three things follow.
+Two rows need the correction spelled out, because the earlier reading was the intuitive one
+and the intuitive one is wrong.
+
+**Binder is not what is closed.** `service call activity 1` reaches `system_server` and comes
+back with that process's own exception — the IPC path is open. What is closed is `exec` of
+`/system/bin/app_process32`, refused at `getattr` on the `zygote_exec` label. And `settings`,
+`cmd`, `am` and `pm` are all thin wrappers that end in `exec app_process`: they fail not
+because the IPC would be refused, but because the launcher cannot be started at all. That is
+why `service call` — a small native binary — works here while `settings put` does not. The 57
+binder denials in the permissive log are real, but they come from a narrower path (fd
+`transfer`, and this project's own native binder code), not from the class as a whole.
+
+**Cross-domain `/proc` is decided per target, not by the act of crossing.** `init`'s and
+`system_server`'s `stat` and `maps` both read fine from this domain; the HAL domains
+(`hal_neuradio`, `hal_graphics`) do not, which is why `ps -A` emits a stream of `getattr` and
+`search` denials for those PIDs. Any statement of the form "cannot walk other processes" is
+too strong — it can walk some of them.
+
+`AF_PACKET` cannot be re-tested, and the reason is itself a result: opening a packet socket
+needs a binary this project controls, and executing one from `/data/anr` is the very thing the
+row above refuses (`anr_data_file` carries no `execute`). The single direct evidence remains
+the permissive-era `packet_socket` lines; the nearest corroboration is that the raw socket
+path is shut as well — `ping` fails at `sendto` with `setopt`/`write` denials on `rawip_socket`.
+
+Four things follow.
 
 First, the practical statement is: **with adb alone on an enforcing unit you get a uid-0
-script runner that can read and write `/data` and very little else.** Packet capture, the
-`settings` and `cmd` calls this project makes, walking other processes, and running its own
-tools out of `/data/anr` all require permissive first. That is what the exploit buys on this
-build — not access, but reach.
+script runner that can read and write `/data`, override file permissions, and make binder
+calls — and very little else.** Packet capture, a global view of `/proc`, writing the kernel
+log, changing firewall rules and running its own tools out of `/data/anr` all still need
+permissive first. That is what the exploit buys on this build — not access, but reach.
 
-Second, capability checks are themselves SELinux-hooked. `CapEff` having a bit set is not
-sufficient under enforcing; the domain also needs `allow <domain> self:capability <perm>`.
-The four `capability=12` denials are exactly that: `CAP_NET_ADMIN` is present in `CapEff`,
-and the policy refuses it anyway. "38 capabilities" describes the mask, not the grant.
+Second, the reach that *is* missing is missing at the launcher, not at the IPC layer. Anything
+that ships as a native binary the policy labels executable — `service`, `sh`, `toybox`,
+`busybox` — runs and speaks binder normally. Anything that reaches system services through
+`app_process` does not run at all. The distinction matters for anyone reading this as "uid 0
+without binder": that is not the shape of the restriction.
 
-Third, writability of the system partitions is a separate axis that none of the above
+Third, capability checks are themselves SELinux-hooked, but they are not always the first wall.
+`CapEff` having a bit set is not sufficient under enforcing; the domain also needs
+`allow <domain> self:capability <perm>`. In the permissive log `CAP_NET_ADMIN` was refused as
+`capability=12` — the bit is present and the policy says no. Under enforcing, `iptables` never
+reaches that check: it dies earlier, at `getopt` on `rawip_socket` and at reads of
+`/proc/self/net/ip_tables_names`. "38 capabilities" describes the mask, not the grant, and the
+first denial in a chain is not necessarily the one the policy is actually about.
+
+Fourth, writability of the system partitions is a separate axis that none of the above
 decides:
 
 | Target | Result |
