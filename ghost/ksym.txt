@@ -1,0 +1,17 @@
+=== id
+whoami=uid=0(root) gid=0(root) groups=0(root) context=u:r:misysdiagnose:s0
+uid=0  euid via busybox=0
+boot_id=55b02767-75dc-4ae7-b7b1-c810a48ca778
+uptime=cat: /proc/uptime: Permission denied
+
+=== kptr_restrict / symbol visibility
+kptr_restrict=cat: /proc/sys/kernel/kptr_restrict: Permission denied
+kallsyms_lines=85846
+kallsyms_head:
+0000000000000000 T do_undefinstr
+0000000000000000 T _stext
+0000000000000000 T __exception_text_start
+0000000000000000 T do_sysinstr
+0000000000000000 T do_mem_abort
+
+=== exact symbols: selinux related

@@ -1,0 +1,29 @@
+# Partition images, firmware and OTA packages are never committed.
+logs/
+dump/
+*.img
+*.bin
+*.apk
+*.zip
+*.tar
+*.gz
+*.elf
+
+# Build output
+ghost/ghost24
+ghost/libmiffmpeg.so
+*.o
+*.so
+*.a
+
+# Local scratch produced by the scripts
+ghost/cmd.sh
+ghost/cmd_boot_pfnd2.sh
+*.log
+
+# Editor / OS noise
+.vscode/
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
