@@ -79,12 +79,13 @@ bash ghost/klogd_ctl.sh start
 `off_selinux.sh` starts the root agent over `TvService` transaction 4400 as soon as it
 runs. That channel is reachable from plain adb shell even with SELinux enforcing
 (measured on a cold boot) — so the exploit is not a prerequisite for a root context.
-Note the qualifier: under enforcing that context can still read and write `/data`, override
-file permissions, and make binder calls, but it cannot capture packets, walk `/proc` beyond a
-few domains, write the kernel log, or execute `app_process`-based tools such as `settings` or
-`cmd`. The full reach used throughout this project assumes the policy has been made
-permissive first. See `WRITEUP.md` section 11.2. The root agent is what supplies the physical
-page the exploit needs.
+Note the qualifier: under enforcing that context can read and write `/data`, override file
+permissions, and send binder calls, but it cannot capture packets, walk `/proc` beyond a few
+domains, write the kernel log, or hand a file descriptor to another domain — which is exactly
+what `cmd`, `settings`, `am` and `pm` need in order to reach system services. The full reach
+used throughout this project assumes the policy has been made permissive first. See
+`WRITEUP.md` section 11.2. The root agent is what supplies the physical page the exploit
+needs.
 
 ## Documentation
 

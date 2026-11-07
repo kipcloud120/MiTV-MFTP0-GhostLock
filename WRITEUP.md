@@ -612,7 +612,8 @@ records what the operation actually did. Where the two disagree, the measurement
 | read `/proc/uptime` | denied, `EACCES` | 154 |
 | read `/proc/net/tcp` and `/proc/net/udp` | denied, `EACCES` | 116 |
 | `AF_PACKET` sockets | not testable from this domain — see below | 66 |
-| binder `call` to `system_server` | **allowed** — `service call activity 1` returns a parcel carrying `system_server`'s own `IllegalArgumentException` | 57 (`transfer` 43 + `call` 14) |
+| binder `call` to `system_server` | **allowed** — `service call activity 1` returns a parcel carrying `system_server`'s own `IllegalArgumentException` | 14 |
+| binder `transfer` to `system_server` (handing over an fd) | **denied** — `avc { transfer } … tclass=binder`, and `cmd` reports `Failed transaction` | 43 |
 | exec `/system/bin/app_process32` | denied at `getattr`, before `execve` runs | 16 |
 | write `/dev/kmsg` | denied, `EACCES` | 12 |
 | exec this project's own `/data/anr/sniff` | denied, `EACCES` | 4 |
@@ -628,14 +629,24 @@ rests on the result of the operation, with the audit lines as corroboration.
 Two rows need the correction spelled out, because the earlier reading was the intuitive one
 and the intuitive one is wrong.
 
-**Binder is not what is closed.** `service call activity 1` reaches `system_server` and comes
-back with that process's own exception — the IPC path is open. What is closed is `exec` of
-`/system/bin/app_process32`, refused at `getattr` on the `zygote_exec` label. And `settings`,
-`cmd`, `am` and `pm` are all thin wrappers that end in `exec app_process`: they fail not
-because the IPC would be refused, but because the launcher cannot be started at all. That is
-why `service call` — a small native binary — works here while `settings put` does not. The 57
-binder denials in the permissive log are real, but they come from a narrower path (fd
-`transfer`, and this project's own native binder code), not from the class as a whole.
+**Binder splits in two, and the split is fd-shaped.** A `call` — no file descriptor, just
+data — reaches `system_server` and comes back with that process's own exception, so the IPC
+path is open. A `transfer`, which is what handing a file descriptor to another domain is
+called, is refused: `avc: denied { transfer } … scontext=u:r:misysdiagnose:s0
+tcontext=u:r:system_server:s0 tclass=binder`.
+
+That distinction is the whole story of the `cmd` family. `/system/bin/cmd` is a 45 KB native
+binary, and `settings`, `am` and `pm` are shell scripts wrapping it. Every one of them ends up
+calling a service's `shellCommand`, which marshals three descriptors — stdin, stdout, stderr —
+into the parcel. So they die at the transfer, reporting `Failure calling service activity:
+Failed transaction`, not at any exec of `app_process`. A first version of this section blamed
+`app_process`; that was wrong, and the control run shows why: the identical command issued
+from the adb shell, uid 2000, returns `0`. **The root context is strictly worse than the
+shell here**, which is worth knowing before reaching for either.
+
+What remains true from the earlier reading is only the narrow point: `service call`, which
+passes no descriptor, works from this domain — which is why `TvService 4400` has always been
+reachable and why rebuilding the agent at section 11.1 never needed permissive first.
 
 **Cross-domain `/proc` is decided per target, not by the act of crossing.** `init`'s and
 `system_server`'s `stat` and `maps` both read fine from this domain; the HAL domains
@@ -657,11 +668,12 @@ calls — and very little else.** Packet capture, a global view of `/proc`, writ
 log, changing firewall rules and running its own tools out of `/data/anr` all still need
 permissive first. That is what the exploit buys on this build — not access, but reach.
 
-Second, the reach that *is* missing is missing at the launcher, not at the IPC layer. Anything
-that ships as a native binary the policy labels executable — `service`, `sh`, `toybox`,
-`busybox` — runs and speaks binder normally. Anything that reaches system services through
-`app_process` does not run at all. The distinction matters for anyone reading this as "uid 0
-without binder": that is not the shape of the restriction.
+Second, what the missing reach costs is best seen through the `cmd` family. Everything the
+`cmd` binary can do — `cmd activity`, `cmd package`, `cmd appops`, `cmd settings`, and the
+`am`/`pm`/`settings` scripts that wrap it — is one `binder transfer` away, and that transfer
+is the one thing this domain cannot do. Under the policy here, uid 0 buys file-permission
+override and the init exec channel, not a wider command surface; the adb shell has the wider
+command surface and a much narrower uid. Neither one alone is the union of the two.
 
 Third, capability checks are themselves SELinux-hooked, but they are not always the first wall.
 `CapEff` having a bit set is not sufficient under enforcing; the domain also needs
