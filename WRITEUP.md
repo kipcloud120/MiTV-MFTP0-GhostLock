@@ -535,6 +535,13 @@ agent up pid=6369 uid=0 Sat Nov  7 16:19:39 CST 2026
 console with adb reaches root without the exploit at all. The two are **independent
 paths**, not a chain.
 
+Note what is ours and what is the vendor's: the primitive is only "execute this script
+as root". `agent.sh` (ghost/agent.sh) is this project's own polling loop over
+`/sdcard/Download/cmd.sh`, written because the init `exec` is synchronous — a script
+that blocks would stall init — and because the property trigger only fires on a
+*change* of value. That is also why a cold boot fires on the first call (the property
+is empty) while a warm device needs the code flipped to something else first.
+
 The mechanism is unresolved: neither `plat_sepolicy.cil` nor `vendor_sepolicy.cil`
 contains a `(allow shell … system_app (binder (call)))` rule — shell's `binder call`
 grants are only `dumpstate`, `hwservicemanager`, `storaged`, `statsd` and
