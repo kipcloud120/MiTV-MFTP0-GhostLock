@@ -68,6 +68,12 @@ bash ghost/off_selinux.sh
 
 # 3. measure the outcome distribution without hitting the target
 bash ghost/nullscan.sh 6
+
+# 4. from here on, one command at a time as root
+bash ghost/r.sh 'id'
+
+# 5. keep a copy of dmesg on /data for the next lockup (pstore is empty on this TV)
+bash ghost/klogd_ctl.sh start
 ```
 
 `off_selinux.sh` starts the root agent over `TvService` transaction 4400 as soon as it

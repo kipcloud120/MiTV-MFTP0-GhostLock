@@ -542,13 +542,38 @@ that blocks would stall init — and because the property trigger only fires on 
 *change* of value. That is also why a cold boot fires on the first call (the property
 is empty) while a warm device needs the code flipped to something else first.
 
-The mechanism is unresolved: neither `plat_sepolicy.cil` nor `vendor_sepolicy.cil`
-contains a `(allow shell … system_app (binder (call)))` rule — shell's `binder call`
-grants are only `dumpstate`, `hwservicemanager`, `storaged`, `statsd` and
-`surfaceflinger`. The policy the device actually loads is
-`/vendor/etc/selinux/precompiled_sepolicy`, a compiled binary that is not necessarily
-identical to the text files shipped alongside it. That discrepancy is the most likely
-explanation and is the open question flagged in section 16.
+The mechanism is now known, and it is not what the `.cil` files suggest — those files are
+never read. init logs:
+
+```
+selinux : SELinux: Loaded policy from /vendor/etc/selinux/precompiled_sepolicy
+SELinux : 8192 avtab hash slots, 29175 rules
+SELinux : 1 users, 4 roles, 1908 types, 0 bools, 93 classes
+```
+
+It takes that path because
+`/vendor/etc/selinux/precompiled_sepolicy.plat_and_mapping.sha256` matches
+`/system/etc/selinux/plat_and_mapping_sepolicy.cil.sha256` (`f464a053…`) — exactly the
+condition for the precompiled fast path. "No such rule in the `.cil`" therefore says
+nothing about the policy that actually runs.
+
+The earlier search was also blind by construction: there is a third text file,
+`plat_pub_versioned.cil`, in which types carry a `_28_0` suffix — `shell_28_0`,
+`system_app_28_0` — so a grep for `allow shell system_app` cannot match anything there.
+Re-run against the versioned names, the answer is unchanged: shell's binder grants are
+still only `dumpstate`, `hwservicemanager`, `storaged`, `statsd` and `surfaceflinger`,
+none of them `system_app` or `system_server`.
+
+That the permission is genuinely granted, rather than the check being skipped, was then
+measured directly. A denial is audited even in permissive mode, and this device does log
+such denials (six `permissive=1` entries from unrelated operations), so an absent `avc:`
+line is evidence of an allow. With the policy permissive, both `service call TvService 1`
+and `service call activity 1` — the latter aimed at the `system_server` domain — went
+through, returned parcels, and produced **no** new `avc:` line.
+
+So the loaded binary policy grants binder calls that the shipped text does not describe.
+Reading the exact rule out of it needs `sesearch` / `secilc` (setools), which is not
+installed on the host; that is the only step still open, and it is tracked in section 16.
 
 Two consequences worth stating plainly:
 
@@ -726,6 +751,28 @@ uid-0 agent that watches `/sdcard/Download/cmd.sh`. From that point any root com
 is one `adb push` away; `ghost/dumpset.sh` and `ghost/dumpraw.sh` are what produced
 the partition set.
 
+Two wrappers make that channel bearable:
+
+```bash
+bash ghost/r.sh 'id'                     # one command as root, output and exit code back
+bash ghost/r.sh -t 60 'pm list packages -3'
+bash ghost/klogd_ctl.sh start            # kernel crash black box
+bash ghost/klogd_ctl.sh tail 80
+```
+
+`r.sh` exists because the root domain's `PATH` is only `/vendor/bin:/vendor/xbin`: `pm`,
+`settings`, `am` and `cmd` are all in `/system/bin` and answer `not found` until it is
+fixed. It also waits for the trailing `R_EXIT=` marker rather than the leading nonce —
+waiting on the nonce alone returns half the output of a slow command, which it did until
+that was measured.
+
+`klogd.sh` exists because `pstore` is 0: without it a locked-up kernel leaves no evidence
+at all. It polls instead of using `dmesg -w` (follow mode block-buffers its stdout on this
+toybox build, so later lines never leave the buffer) and appends only the delta after an
+anchor line (writing a full snapshot every second would rewrite 570 KB continuously on a
+TV that prints audio parameters once a second). Measured cost when idle: no measurable CPU,
+about 1.8 KB/s written.
+
 Every script takes `DEV` and `ADB` from the environment. On MSYS/Git Bash, adb
 remotes must be written as `//sdcard/...` with `MSYS2_ARG_CONV_EXCL='*'
 MSYS_NO_PATHCONV=1`, or the shell rewrites the path.
@@ -746,7 +793,19 @@ MSYS_NO_PATHCONV=1`, or the shell rewrites the path.
 4. **Policy audit.** `system.img` and `vendor.img` are dumped; a full review of the
    `.cil` files, and a diff of the OTA package against the dump, would probably
    surface more of the vendor's engineering interfaces.
-5. **Why `shell` can call `system_app`.** The text policy has no rule for it, yet the
-   transaction succeeds (section 11.1). Pulling
-   `/vendor/etc/selinux/precompiled_sepolicy` and comparing it against the two `.cil`
-   files should identify the grant — or show that the check is not what we assume.
+5. **Which rule of the binary policy allows `shell` to reach `system_app`.** Narrowed, not
+   solved. Section 11.1 now establishes that the device loads only
+   `/vendor/etc/selinux/precompiled_sepolicy` (29,175 rules) and never reads the three
+   `.cil` files, so the shipped text cannot answer the question at all. What remains is
+   extracting the grant from the binary:
+   `sesearch --allow -s shell -t system_app -c binder precompiled_sepolicy`. That needs
+   setools or secilc, which the host does not have — a Linux environment has to be set up
+   first.
+6. **A self-built kernel module.** Not attempted, recorded because the door looks unlocked:
+   `modules_disabled=0`, 38 vendor `.ko` files load, `insmod` exists, and the kernel is
+   **aarch64** while userspace is armv8l with
+   `vermagic=4.9.118+ SMP preempt mod_unload modversions aarch64`. The `module_layout` CRC
+   could be lifted from a vendor module's `__versions` section, and with the kernel fixed
+   at a known address (no KASLR) a module could import nothing and call by absolute
+   address. The downside is severe: one wrong `struct module` field corrupts the kernel on
+   load, and `pstore` is 0, so there would be no record of what went wrong.

@@ -59,4 +59,16 @@ if ! SH 'ps -A -o ARGS | grep -q "[a]gent.sh" && echo yes' | grep -q yes; then
   sleep 3
 fi
 
-SH 'printf "agent=%s pfnd2=%s\n" "$(ps -A -o ARGS | grep -c "[a]gent.sh")" "$(ps -A -o ARGS | grep -c "[p]fnd2.sh")"'
+# 4) crash black box, if it was ever deployed. It cannot be started any earlier than
+#    this: klogd runs as root, and root only exists once step 1 worked.
+if SH 'test -f /data/anr/klogd.sh && echo yes' | grep -q yes; then
+  if SH 'ps -A -o ARGS | grep -q "[/]data/anr/klogd.sh" && echo yes' | grep -q yes; then
+    echo "[ensure] klogd already running"
+  else
+    echo "[ensure] klogd missing, starting one"
+    SH '( /system/bin/sh /data/anr/klogd.sh </dev/null >/dev/null 2>&1 & )'
+    sleep 2
+  fi
+fi
+
+SH 'printf "agent=%s pfnd2=%s klogd=%s\n" "$(ps -A -o ARGS | grep -c "[a]gent.sh")" "$(ps -A -o ARGS | grep -c "[p]fnd2.sh")" "$(ps -A -o ARGS | grep -c "[/]data/anr/klogd.sh")"'
