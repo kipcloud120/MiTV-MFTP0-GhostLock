@@ -15,7 +15,7 @@
 set -u
 : "${DEV:?set DEV=<tv-ip>:5555}"
 ADB="${ADB:-adb}"
-HERE="$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || pwd)"
 N="${1:-6}"; shift || true
 EXTRA="$*"
 OUT="$HERE/../logs/nullscan.log"

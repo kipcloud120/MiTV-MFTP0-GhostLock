@@ -479,20 +479,20 @@ sites in the dex, and `pppd_eth0` reads a world-writable
 
 ---
 
-## 11. Why the backdoor needs the exploit first
+## 11. Who can reach the backdoor
 
-The channel exists on every unit, but it is not reachable from an ordinary app. The
-SELinux rules decide who can talk to it; all of the following were read out of the
-compiled policy (`*.cil`), with file and line references:
+The channel exists on every unit. The SELinux rules decide who can talk to it; the
+table below was read out of the compiled policy (`*.cil`, file and line references),
+then **corrected by measurement** — the last row is the one that matters:
 
 | Subject | write `vendor_default_prop` | `find` TvService | binder call -> `system_app` |
 |---|---|---|---|
 | `untrusted_app` | no (read only) | no | no |
-| `shell` (adb) | no | no | no |
+| **`shell` (adb)** | no | yes (TvService is in `service_manager_type`) | **yes, measured** (section 11.1) |
 | **`mediaserver`** | no | yes (`vendor:2673`) | **yes** (`plat:9335`) |
 | `system_app` | **yes** (`vendor:3442`) | yes (`plat:14747`) | self |
 
-The three rules that make `mediaserver` the pivot:
+The two rules that make `mediaserver` a pivot:
 
 ```
 (allow mediaserver_28_0 system_data_file_28_0 (file (ioctl read getattr lock map
@@ -507,12 +507,53 @@ The three rules that make `mediaserver` the pivot:
 attribute prefixed `vendor.` defaults to type `vendor_default_prop`
 (`plat_property_contexts:148`).
 
-So the ordering is forced: the exploit first (to get permissive, or to act from a
-`mediaserver`-like domain), the backdoor second. It cannot be the other way around.
+### 11.1 Correction: adb shell can open the backdoor while enforcing
 
-One more constraint worth recording: `mediaserver` cannot `exec` a shell (no
-`shell_exec` allowance), which is why the persistence payload execs a *copy* of
-`/system/bin/service` placed in a `system_data_file` directory rather than `/system/bin/sh`.
+An earlier version of this section claimed the ordering was forced — exploit first, to
+get permissive, then the backdoor. **That is wrong.** Measured on a cold boot
+(watchdog reset, `enforce=1`, no agent running, `/data/misc/mitv_upgraded_libs` still
+empty):
+
+```
+$ adb shell 'id; cat /sys/fs/selinux/enforce'
+uid=2000(shell) ... context=u:r:shell:s0
+1
+$ adb shell 'service call TvService 4400 s16 s s16 sh,/sdcard/Download/agent.sh'
+Result: Parcel(00000000    '....')
+```
+
+Within one second, init had executed the payload as root:
+
+```
+6368  root  u:r:misysdiagnose:s0  misysdiagnose -s sh,/sdcard/Download/agent.sh
+6370  root  u:r:misysdiagnose:s0  sh /sdcard/Download/agent.sh
+# /sdcard/Download/agent.log
+agent up pid=6369 uid=0 Sat Nov  7 16:19:39 CST 2026
+```
+
+`enforce` was 1 before and after; the shell process has `CapEff=0`. So on this build a
+console with adb reaches root without the exploit at all. The two are **independent
+paths**, not a chain.
+
+The mechanism is unresolved: neither `plat_sepolicy.cil` nor `vendor_sepolicy.cil`
+contains a `(allow shell … system_app (binder (call)))` rule — shell's `binder call`
+grants are only `dumpstate`, `hwservicemanager`, `storaged`, `statsd` and
+`surfaceflinger`. The policy the device actually loads is
+`/vendor/etc/selinux/precompiled_sepolicy`, a compiled binary that is not necessarily
+identical to the text files shipped alongside it. That discrepancy is the most likely
+explanation and is the open question flagged in section 16.
+
+Two consequences worth stating plainly:
+
+* The exploit is not the key to the backdoor. Its value is a *local* privilege
+  escalation with no adb in the loop, and a path that does not depend on a vendor bug.
+* Because root is available from adb regardless, the physical page the `--soft` recipe
+  needs (section 7.4) can always be resolved. There is no cold-boot deadlock — a
+  concern that would otherwise apply, since PFN resolution needs root.
+
+One constraint still holds: `mediaserver` cannot `exec` a shell (no `shell_exec`
+allowance), which is why the persistence payload execs a *copy* of `/system/bin/service`
+placed in a `system_data_file` directory rather than `/system/bin/sh`.
 
 ---
 
@@ -698,3 +739,7 @@ MSYS_NO_PATHCONV=1`, or the shell rewrites the path.
 4. **Policy audit.** `system.img` and `vendor.img` are dumped; a full review of the
    `.cil` files, and a diff of the OTA package against the dump, would probably
    surface more of the vendor's engineering interfaces.
+5. **Why `shell` can call `system_app`.** The text policy has no rule for it, yet the
+   transaction succeeds (section 11.1). Pulling
+   `/vendor/etc/selinux/precompiled_sepolicy` and comparing it against the two `.cil`
+   files should identify the grant — or show that the check is not what we assume.

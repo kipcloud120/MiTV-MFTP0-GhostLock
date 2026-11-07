@@ -14,7 +14,7 @@
 set -u
 : "${DEV:?set DEV=<tv-ip>:5555}"
 ADB="${ADB:-adb}"
-HERE="$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || pwd)"
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
 SH() { "$ADB" -s "$DEV" shell "$@" 2>&1 | tr -d '\r'; }

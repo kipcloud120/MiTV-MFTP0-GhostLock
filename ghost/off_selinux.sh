@@ -30,7 +30,7 @@
 set -u
 : "${DEV:?set DEV=<tv-ip>:5555}"
 ADB="${ADB:-adb}"
-HERE="$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || pwd)"
 MAX="${1:-20}"
 OUT="$HERE/../logs/off_selinux.log"
 mkdir -p "$HERE/../logs"

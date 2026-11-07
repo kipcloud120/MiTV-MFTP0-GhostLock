@@ -12,7 +12,7 @@
 set -u
 : "${DEV:?set DEV=<tv-ip>:5555}"
 ADB="${ADB:-adb}"
-HERE="$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || pwd)"
 BIN="${GHOST24:-$HERE/ghost24}"
 ARGS="$*"
 LOG=/data/local/tmp/g24.log

@@ -45,11 +45,11 @@ Not included, on purpose:
 ## Build
 
 ```bash
-# exploit (static, 32-bit ARM)
-zig build-exe -target arm-linux-musleabihf -static -O2 -Wall \
-    ghost/ghost24.c -femit-bin=ghost/ghost24
+# exploit (static, 32-bit ARM). Note: zig build-exe rejects -O2/-Wall; use zig cc.
+zig cc -target arm-linux-musleabihf -static -O2 -Wall \
+    -o ghost/ghost24 ghost/ghost24.c
 
-# persistence payload (frozen experiment, see WRITEUP.md section 11)
+# persistence payload (frozen experiment, see WRITEUP.md section 12)
 zig build-lib -target arm-linux-musleabihf -O ReleaseSmall -dynamic \
     -lc ghost/ghostboot.c -femit-bin=ghost/libmiffmpeg.so
 ```
@@ -70,8 +70,11 @@ bash ghost/off_selinux.sh
 bash ghost/nullscan.sh 6
 ```
 
-`off_selinux.sh` starts the root agent as soon as SELinux is permissive — before
-that, `TvService` cannot be reached (`WRITEUP.md` section 10 explains why).
+`off_selinux.sh` starts the root agent over `TvService` transaction 4400 as soon as it
+runs. That channel is reachable from plain adb shell even with SELinux enforcing
+(measured on a cold boot) — so the exploit is not a prerequisite for root, and the
+root agent is what supplies the physical page the exploit needs. See `WRITEUP.md`
+section 11.
 
 ## Documentation
 
