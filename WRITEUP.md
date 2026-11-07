@@ -908,8 +908,10 @@ MSYS_NO_PATHCONV=1`, or the shell rewrites the path.
 2. **A non-zero write gadget.** The current primitive's `rb_right` must be 0 because
    case 1 dereferences a non-NULL child. Another `rb_erase` path, or a different
    chain node, might avoid that.
-3. **`misc` -> fastboot.** The BCB is unsigned and writable. Unexplored, with
-   unassessed brick risk.
+3. **`/cache/recovery/command`.** The string exists in the recovery binary at `0x175c60`
+   but the xref scan finds no reference to it. Whether recovery reads it at all is
+   untested; the probe is to write `--locale=en-US`, reboot, and see whether `last_locale`
+   changes. (The earlier idea of writing an AOSP BCB into `misc` is dead — see section 17.4.)
 4. **Policy audit.** `system.img` and `vendor.img` are dumped; a full review of the
    `.cil` files, and a diff of the OTA package against the dump, would probably
    surface more of the vendor's engineering interfaces.
@@ -929,3 +931,284 @@ MSYS_NO_PATHCONV=1`, or the shell rewrites the path.
    at a known address (no KASLR) a module could import nothing and call by absolute
    address. The downside is severe: one wrong `struct module` field corrupts the kernel on
    load, and `pstore` is 0, so there would be no record of what went wrong.
+
+---
+
+## 17. The recovery image: what it can and cannot do
+
+The question: is there any way into recovery that does not require wired adb?
+No. What follows is the set of measurements that close each door in turn.
+
+### 17.1 What one recovery boot actually left behind
+
+The device was booted into recovery once, to look for an ADB entry in the menu. The
+only trace it left:
+
+```
+/cache/recovery/last_locale   2026-11-07 20:57   zh-CN
+/cache/recovery/last_log      still 2023-08-27, not one byte rewritten
+```
+
+A normal menu session rewrites `last_log` on entry and mirrors it to `/dev/console`.
+It was not rewritten, so that boot never reached a menu session. This is consistent
+with only four entries being visible: the page holds four buttons, and the rest
+(`mount_usb` and friends) appear only with a USB stick inserted.
+
+### 17.2 The UI is a Xiaomi graphical menu, not AOSP's text menu
+
+The binary names its own source file and log tag:
+
+```
+bootable/recovery/GraphicScreenRecoveryUI.cpp
+GraphicScreenRecoveryUI StartMenu
+```
+
+Immediately after those strings sits a table of button image names: `reboot_normal`,
+`wipe_normal`, `install_update_normal`, `mount_usb_normal`, `power_off_normal`,
+`wipe_cache_normal`, `wipe_data_normal`, `format_data_normal`, `usb_connected`,
+`usb_no_connection`, `usb_umount_*`, `choice_yes|no`, `back`, `back_main`,
+`install_update_confirm|ok|no_file|file_corrupt|verify_fail`.
+
+The AOSP text path is dead code. Scanning every `bl` in the text segment:
+
+```
+GetMenuItems(0xcc0c)         callers: NONE
+HandleMenuKey(0xcc4c)        callers: NONE
+get_menu_selection(0x14c38)  callers: NONE
+```
+
+The 12-entry ASCII menu at `0x193000` in `.data` is therefore never rendered, and any
+inference of the form "item 3 of the menu is Apply update from ADB" is invalid on this
+image.
+
+Transcribed from the button PNGs (540x108, `rd/res/images/xiaomi/`). The UI is
+Chinese-localized; labels are given here in English:
+
+| image | label (translated) |
+|---|---|
+| `reboot_*` | Reboot |
+| `wipe_*` | Wipe all data |
+| `install_update_*` | Install update to system |
+| `mount_usb_*` | Enable USB storage |
+| `power_off_*` | Power off |
+| `wipe_cache_*` | Wipe cache |
+| `wipe_data_*` | Wipe user data |
+| `format_data_*` | md5 identical to `wipe_normal.png` (`1a1dab96ec9d4b4a35e2e548a2cc3b33`) |
+| `restore_rom_selected.png` | Restore factory system — orphan resource, no `_normal` variant, no code path |
+
+Eight buttons, and none of them is ADB, sideload or shell. A second, two-item rescue
+screen exists (`Try again` / `Factory data reset`) and also has no ADB entry.
+
+### 17.3 Wireless adb is structurally impossible
+
+Two independent walls.
+
+**Wall 1 — adbd never starts.**
+
+```
+init.rc:90   service adbd /sbin/adbd --root_seclabel=u:r:su:s0 --device_banner=recovery
+                 disabled                    ← not started by class_start default
+init.rc:96   on property:ro.debuggable=1
+                 start adbd                  ← prop.default:9 sets 0, never true
+```
+
+The only other starter is `ctl.start adbd` from the menu or `adb_install.cpp`, and that
+publishes a USB gadget (`/dev/usb-ffs/adb`, `18D1:D001`), not a socket.
+
+**Wall 2 — even if adbd ran, there is no network.**
+
+```
+init.rc:48                     ifup lo                      ← loopback only
+init.recovery.m7642.rc:24      #insmod .../wlan.ko          ← commented out
+rd/sbin/: adbd busybox charger e2fsdroid_static insmod mke2fs_static mksh recovery
+          no dhcpcd, no wpa_supplicant, no ifconfig, no ip
+```
+
+Worth stating explicitly because it is easy to misread: the port properties *are*
+present (`service.adb.tcp.port=5555`, `persist.adb.tcp.port=5555`, `ro.adb.secure=0`),
+and adbd carries both strings. The gap is not configuration — it is that adbd does not
+start and there is no interface to bind. Recovery never brings up `eth0` either.
+
+So there is no remote entry into recovery at all. What is left is a UART console or the
+remote-control menu.
+
+### 17.4 `misc` is a MStar "APOLLO message", not an AOSP BCB
+
+A 512 KB `misc` dump searched byte by byte for `boot-recovery`, `--sideload`,
+`--update_package` and `--wipe_data`: all four are absent. The first 32 bytes are a
+U-Boot uImage header:
+
+```
+27 05 19 56 | 94 4f 16 c5 | 63 e5 29 fa | 01 24 72 00
+20 28 00 00 | 20 28 00 00 | 19 17 9e 75 | 05 02 02 00 | "Linux-4.9.118+"
+```
+
+load/entry are `0x20280000`, matching `kernel_addr` in the recovery image header. A dump
+taken hours apart differs by 43 bytes, so the region is being rewritten normally, not
+corrupted.
+
+The vendor's own log calls it by name — `start to clear APOLLO message`,
+`Failed to clear BCB message`, `mmc read.p 0x%08lX misc 40`. It is a private MStar
+structure. A textual AOSP BCB existed on exactly one occasion, the factory OTA in 2023
+(see 17.6). Writing AOSP BCB strings here would not be parsed by either the bootloader
+or recovery.
+
+The BCB keyword table in the binary is, however, four entries longer than AOSP's:
+
+```
+/udisk/xiaomi_update  update_package  retry_count  wipe_data
+format_data           clean_app       wipe_cache   show_text
+sideload              sideload_auto_reboot  just_exit  locale
+shutdown_after        reason          security
+```
+
+Vendor additions: `format_data`, `clean_app`, `security`, `/udisk/xiaomi_update`.
+
+### 17.5 `res/keys` is the vendor's own release key
+
+```
+len      = 64 (RSA-2048)
+n0inv    on disk = 0xf0647c17   recomputed = 0xf0647c17   MATCH
+modulus  = b7833409d1f228b6b3d2cde4311812b95b7f9e6a9042e7cff1bfca3d11187329
+           6971aa42981482dc8767d1e9fd5d4aafeb758a3715873a93df6326d8218d76c1 ...
+mod(BE) sha256 = 7c48f2cc6d1888883c485b97829ee77908e2ed60d6be37fea9363441413a2237
+```
+
+| key | sha256 prefix |
+|---|---|
+| this device's `res/keys` | `7c48f2cc…` |
+| AOSP testkey | `d6931904…` |
+| AOSP platform | `9c780592…` |
+
+All three differ, so the recovery trusts a vendor release key and nothing else. The
+shipped OTA (`package-alita-6129-user.zip`, 1.36 GB) is signed with it, which is
+consistent with `ro.product.vendor.name=alita` and `/udisk/update-alita.zip`. A
+self-signed `update.zip` is not an option.
+
+### 17.6 The one normal recovery session on record
+
+The factory OTA of 2023 is the only log on the device that shows recovery doing its job:
+
+```
+[0.013393] I:Boot command: boot-recovery
+[0.013400] I:Got 3 arguments from boot message
+[0.017236] locale is [zh-CN]
+[0.370071] Command: "/sbin/recovery" "--update_package=@/cache/recovery/block.map" "--locale=zh-CN"
+[0.450895] I:Update location: @/cache/recovery/block.map
+```
+
+and `last_install` from the same run: `target_build 6129` from `source_build 5224`,
+`bytes_written_system 1405304832`, `bytes_stashed_system 1707626496`,
+`bytes_written_vendor 662024192`, `bytes_stashed_vendor 753553408`,
+`uncrypt_file /data/ota_package/package-9.5224-9.6129.zip`.
+
+### 17.7 Channels that do not need TCP adb
+
+| channel | gives a shell? | state |
+|---|---|---|
+| UART console | **yes** — the only one | `service console /sbin/busybox sh`, `user root`, `u:r:shell:s0`; needs the case opened |
+| `/cache/recovery/command` | arguments only | string present at `0x175c60`, but the xref scan is empty — untested |
+| `misc` BCB | no | occupied by the APOLLO message (17.4) |
+| remote-control menu | no | wipe, install a signed package, mount `/system`, read logs |
+
+### 17.8 fastboot exists, but USB only
+
+`MBOOT.img` (`MUSB-02.05`, `CL565126(Feb 10 2023 - 01:15:35)`) contains
+`fastboot_port`, `Listening for fastboot transfer on %s`, `enter fastboot mode`,
+`MTK Fastboot..`, `fastboot_okay` / `fastboot_fail` / `unknown command`,
+`--fastboot`, `boot-bootloader`, `reboot-bootloader`, `rebooting to fastbootd`, and the
+same `mmc read.p 0x%08lX misc 40` used for the APOLLO message,
+plus `avbab set_device_state 0 / unlock`, `avbab disable-verity`, `close_avb_cnt`.
+
+On the system side: `ro.boot.bootloader=123456789` (a placeholder),
+`ls /system/bin | grep fastboot` is empty (no fastbootd binary),
+`ro.boot.verifiedbootstate=green`, `ro.boot.veritymode=enforcing`.
+
+So the protocol runs over the USB endpoint only — no network or serial transport, and the
+bootloader does not time out of fastboot on its own. The `avbab` and `unlock` commands
+belong to the factory-mode flow (`/factory.prop`, `mitv.factory.*`), not to a
+user-facing `fastboot oem unlock`.
+
+---
+
+## 18. Hardware inventory
+
+Collected over the existing uid 0 channel with the policy made permissive. `boot_id` did
+not change and uptime stayed continuous, so this is all read-only.
+
+### 18.1 SoC
+
+| item | value | source |
+|---|---|---|
+| SoC | **MStar M7642** (MediaTek MT9652 platform) | `/proc/cpuinfo` Hardware, `/proc/device-tree/model`, `compatible = arm,m7642` |
+| CPU | 4x **Cortex-A53**, ARMv8-A, 32-bit userspace | `CPU part 0xd09`, `implementer 0x41`, `variant 0x1` |
+| Features | aes pmull sha1 sha2 crc32 vfpv4 lpae neon | `/proc/cpuinfo` |
+| Platform | `DP1C_2B:RZ2L`, `hardware_version=rz2l` | `androidboot.model_name` |
+| Wireless combo | **MTK7668** (WiFi + BT) | `androidboot.module=MTK7668` |
+
+### 18.2 RAM
+
+```
+MemTotal 2,704,376 kB (2.58 GiB visible)
+```
+
+| device-tree node | range | size |
+|---|---|---|
+| `memory@20200000` | 0x20200000–0x423FFFFF | 546 MiB |
+| `memory@50800000` | 0x50800000–0x9E1FFFFF | 1242 MiB |
+| `memory@80000000` | 0x1_80000000–0x1_BFFFFFFF | 1024 MiB (high window) |
+
+`cmdline`: `LX_MEM=0x22200000`, `LX_MEM2=0x50800000,0x4DA00000`,
+`LX_MEM3=0x180000000,0x40000000`, `DRAM_ASYM_SIZE=40000000`.
+
+The Linux regions total 2.75 GiB; `0x0–0x201FFFFF` (514 MiB) is withheld from the kernel
+for TEE, the bootloader and the secure video path. The part is a 3 GB SKU.
+
+Not obtainable in software: the DRAM vendor and part number. M7642 exposes no SPD path,
+and DRAM is brought up by a closed MRC blob inside MBOOT (`CurMRCAddr`); MBOOT's strings
+contain only placeholders such as `DRAM Channel 0..3 Size` and `DDR Mode`, with no
+`DDR4`/`DDR3`/`LPDDR` variant and no vendor name.
+
+### 18.3 eMMC
+
+| item | value |
+|---|---|
+| Part name | **DA4032** |
+| Vendor | **SanDisk** (`manfid 0x000045`, JEDEC MID; `oemid 0x0100`) |
+| Capacity | 61,071,360 sectors x 512 = **31,268,536,320 B ≈ 29.1 GiB** (32 GB class) |
+| Manufacture date | **2022-02** |
+| CID | `45010044413430333201c9cc16462900` |
+| Serial | `0xc9cc1646`; fwrev `04140619` |
+| Wear | `life_time 0x01 0x01`, `pre_eol_info 01` — healthy |
+
+### 18.4 Panel
+
+| item | value |
+|---|---|
+| Vendor | **CSOT** (`ro.boot.mi.panel_vendor=CSOT`) |
+| Size | **65 inch** (`ro.boot.mi.panel_size=65`) |
+| Part | **ST6451D03-7** (config `RZ2L_ST6451D03_7.ini`) |
+| Native resolution | **3840x2160** (`m_wPanelWidth` / `m_wPanelHeight`) |
+| Panel type | a-Si TFT-LCD, HVA, 10-bit, 120 Hz capable |
+| Interface | **V-by-One 16 lane** (`m_pPanelName = UD_VB1_16LANE`, LinkType 10, LinkExtType 58, single port) |
+| Drive timing | DCLK **600 MHz**, HTotal **4400**, VTotal **2260** → **4K@60.3 Hz**; HStart 110, VStart 98 |
+| Backlight PWM | period `0x4119` (16665), min `0x9C3`, non-inverted (`_PWM960` low-frequency variant exists, unused here) |
+| UI output | fb0 "MStar FB", `1920x1080p-51`, 32 bpp, density 320 |
+| Colour / PQ | `pq_RZ2L_CSOT/`, `gammatable_RZ2L_CSOT.ini`, `HDR_RZ2L_CSOT.ini` |
+| Flags | `panel_buildin=true`, `panel_type=3`, `panel_memc_attribute=1` |
+
+One trap worth recording: `RZ2L_HV650QUB_E9D.ini` also declares
+`m_pPanelName = UD_VB1_16LANE`, but it is referenced from `Customer_15.ini` and paired
+with `pq_RZ2L_BOE` / `gammatable_RZ2L_BOE` — it is the **BOE** sibling SKU. This unit's
+`CFG_SYS_INI=sys_14.ini` points at `Customer_14.ini`, which selects the CSOT branch.
+Identifying the panel by ini filename alone gives the wrong answer.
+
+### 18.5 Identifiers
+
+`model_name` is `DP1C_2B:RZ2L`; the serial number, assembly number and WiFi MAC are
+device-unique and deliberately omitted here.
+
+### 18.6 What cannot be read
+
+DRAM vendor and part number (no SPD, closed MRC); the T-CON IC part on the panel; and the
+eMMC NAND type (`ext_csd` does not carry it).

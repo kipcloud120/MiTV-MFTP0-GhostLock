@@ -18,10 +18,11 @@ unprivileged process. Arbitrary write of non-zero data was not achieved.
 |---|---|
 | Target | Xiaomi MiTV-MFTP0 / `alita` / L65R8-X |
 | Build | `23.2.10.6129` · Android 9 · `PPR2.180905.006.A1` · user/release-keys |
-| SoC | MediaTek MT9652 (platform `m7642`), armv8l, 2.6 GB RAM |
+| SoC | MediaTek MT9652 (platform `m7642`, MStar M7642), armv8l, 3 GB class RAM (2.58 GiB visible) |
 | Kernel | Linux 4.9.118+ (MStar GCC 4.9.2, built 2023-02-10) |
 | Boot | AVB green, dm-verity enforcing, `vbmeta` = SHA256_RSA2048 |
-| Storage | 29.8 GB eMMC, MStar private partition table (not GPT), 37 entries |
+| Storage | 29.1 GiB eMMC (SanDisk DA4032), MStar private partition table (not GPT), 37 entries |
+| Panel | CSOT 65", 3840x2160, V-by-One 16 lane, driven at 4K@60 |
 | Bug | `futex_wait_requeue_pi` leaves `task->pi_blocked_on` dangling on the ETIMEDOUT path |
 | Primitive | write 8 zero bytes to an arbitrary physmap address |
 | Success rate | ~1/3 per attempt; ~2/3 silent no-op; ~1/5 watchdog reset |
@@ -92,7 +93,8 @@ needs.
 * **[WRITEUP.md](WRITEUP.md)** — the full technical write-up: kernel configuration,
   the bug, the re-derived stack geometry, the `--soft` recipe, measured outcome
   distribution, the `TvService` backdoor, the SELinux boundary matrix, the frozen
-  persistence chain, and the partition-table findings.
+  persistence chain, the partition-table findings, a teardown of the recovery image
+  (section 17) and the hardware inventory (section 18).
 * **[ghost/ghost24.c](ghost/ghost24.c)** — the exploit, with the version-by-version
   reasoning inline. Start at the top of the file.
 
